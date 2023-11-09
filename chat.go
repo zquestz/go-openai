@@ -2,17 +2,23 @@ package openai
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 )
 
+type ContentType string
+
 // Chat message role defined by the OpenAI API.
 const (
-	ChatMessageRoleSystem    = "system"
-	ChatMessageRoleUser      = "user"
-	ChatMessageRoleAssistant = "assistant"
-	ChatMessageRoleFunction  = "function"
-	ChatMessageRoleTool      = "tool"
+	ChatMessageRoleSystem                = "system"
+	ChatMessageRoleUser                  = "user"
+	ChatMessageRoleAssistant             = "assistant"
+	ChatMessageRoleFunction              = "function"
+	ChatMessageRoleTool                  = "tool"
+	ContentTypeText          ContentType = "text"
+	ContentTypeImage         ContentType = "image_url"
 )
 
 const chatCompletionsSuffix = "/chat/completions"
@@ -51,9 +57,55 @@ type PromptAnnotation struct {
 	ContentFilterResults ContentFilterResults `json:"content_filter_results,omitempty"`
 }
 
+type Part struct {
+	Type     ContentType `json:"type"`
+	ImageUrl string      `json:"image_url,omitempty"`
+	Text     string      `json:"text,omitempty"`
+}
+
+type Parts []Part
+
+func (ps Parts) MarshalJSON() ([]byte, error) {
+	if len(ps) == 0 {
+		return []byte("\"\""), nil
+	}
+	cc := []Part(ps)
+	if len(cc) == 1 && cc[0].Type == "text" {
+		if cc[0].Text != "" {
+			return json.Marshal(cc[0].Text)
+		}
+		return []byte("\"\""), nil
+	}
+	return json.Marshal([]Part(cc))
+}
+
+func (ps *Parts) UnmarshalJSON(bs []byte) error {
+	if bs[0] == '"' && bs[len(bs)-1] == '"' {
+		if len(bs) == 2 {
+			*ps = nil
+			return nil
+		}
+		var s string
+		err := json.Unmarshal(bs, &s)
+		if err != nil {
+			return err
+		}
+		*ps = Parts{{Type: ContentTypeText, Text: s}}
+		return nil
+	}
+	var parts []Part
+	err := json.Unmarshal(bs, &parts)
+	if err != nil {
+		return err
+	}
+	*ps = parts
+	return nil
+}
+
 type ChatCompletionMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+	Parts   Parts  `json:"content"`
 
 	// This property isn't in the official documentation, but it's in
 	// the documentation for the official library for python:
@@ -63,6 +115,44 @@ type ChatCompletionMessage struct {
 
 	FunctionCall *FunctionCall `json:"function_call,omitempty"`
 	ToolCalls    []ToolCall    `json:"tool_calls,omitempty"`
+}
+
+func (m *ChatCompletionMessage) UnmarshalJSON(bs []byte) error {
+	msg := struct {
+		Role         string        `json:"role"`
+		Content      string        `json:"-"`
+		Parts        Parts         `json:"content"`
+		Name         string        `json:"name,omitempty"`
+		FunctionCall *FunctionCall `json:"function_call,omitempty"`
+		ToolCalls    []ToolCall    `json:"tool_calls,omitempty"`
+	}(*m)
+	err := json.Unmarshal(bs, &msg)
+	if err != nil {
+		return err
+	}
+	*m = ChatCompletionMessage(msg)
+	if len(m.Parts) == 1 && m.Parts[0].Type == ContentTypeText {
+		m.Content = m.Parts[0].Text
+	}
+	return nil
+}
+
+func (m ChatCompletionMessage) MarshalJSON() ([]byte, error) {
+	msg := struct {
+		Role         string        `json:"role"`
+		Content      string        `json:"-"`
+		Parts        Parts         `json:"content"`
+		Name         string        `json:"name,omitempty"`
+		FunctionCall *FunctionCall `json:"function_call,omitempty"`
+		ToolCalls    []ToolCall    `json:"tool_calls,omitempty"`
+	}(m)
+	if msg.Content != "" && len(msg.Parts) == 1 && msg.Parts[0].Type == ContentTypeText && msg.Parts[0].Text == msg.Content {
+	} else if msg.Content != "" && len(msg.Parts) > 0 {
+		return nil, fmt.Errorf("Content and Parts are mutually exclusive")
+	} else if msg.Content != "" {
+		msg.Parts = Parts{{Type: ContentTypeText, Text: msg.Content}}
+	}
+	return json.Marshal(msg)
 }
 
 type ToolCall struct {
