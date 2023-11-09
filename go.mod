@@ -1,3 +1,3 @@
 module github.com/zquestz/go-openai
 
-go 1.18
+go 1.21.4
